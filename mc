@@ -10,13 +10,15 @@ Usage:
     mc --list                 # list installed instances
     mc 1.21.4-fabric          # launch a specific instance
     mc --fullscreen           # start fullscreen
+    mc -u Steve               # play as another name (this run only)
+    mc --set-user Steve       # remember that name for future runs
     mc --dry-run              # print the java command instead of running it
     mc --detach               # start in the background, log to logs/mc-stdout.log,
                               # then you can close the terminal
 
 Environment:
     MC_DIR      path to the .minecraft directory (auto-detected otherwise)
-    MC_USER     player name (default: $USER)
+    MC_USER     player name (overrides the saved name, default: $USER)
     MC_UUID     player UUID (default: offline UUID derived from the name)
     MC_TOKEN    access token (default: 0 -> offline mode)
     MC_MEM      heap size (default: 2G)
@@ -280,6 +282,31 @@ def offline_uuid(name):
     return str(uuidlib.UUID(bytes=bytes(digest)))
 
 
+def config_path():
+    if PLATFORM == "windows" and os.environ.get("APPDATA"):
+        base = os.environ["APPDATA"]
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOME, ".config")
+    return os.path.join(base, "mc", "config.json")
+
+
+def load_config():
+    try:
+        with open(config_path(), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(data):
+    path = config_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+
+
 def main(argv):
     if "-h" in argv or "--help" in argv:
         print(HELP)
@@ -290,12 +317,50 @@ def main(argv):
     if not versions:
         die(f"no installed versions in {mc_dir}/versions")
 
+    # split flags from the optional instance name (flags may carry a value)
+    cli_user = None
+    set_user = None
+    positional = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ("-u", "--user", "--username", "--set-user"):
+            if i + 1 >= len(argv):
+                die(f"{arg} needs a name")
+            if arg == "--set-user":
+                set_user = argv[i + 1]
+            else:
+                cli_user = argv[i + 1]
+            i += 2
+            continue
+        if arg.split("=", 1)[0] in ("--user", "--username", "--set-user") and "=" in arg:
+            value = arg.split("=", 1)[1]
+            if arg.startswith("--set-user"):
+                set_user = value
+            else:
+                cli_user = value
+            i += 1
+            continue
+        if not arg.startswith("-"):
+            positional.append(arg)
+        i += 1
+
+    config = load_config()
+
+    if set_user is not None:
+        if not set_user.strip():
+            die("--set-user needs a non-empty name")
+        config["username"] = set_user.strip()
+        save_config(config)
+        print(f"[mc] player name saved: {config['username']} ({config_path()})", file=sys.stderr)
+        return
+
     if "--list" in argv:
         for v in versions:
             print(v)
         return
 
-    version = next((a for a in argv if not a.startswith("-")), versions[0])
+    version = positional[0] if positional else versions[0]
     fullscreen = "--fullscreen" in argv
     dry_run = "--dry-run" in argv
     detach = any(a in ("--detach", "-d") for a in argv) or os.environ.get("MC_DETACH") not in (None, "", "0")
@@ -338,7 +403,14 @@ def main(argv):
         classpath.append(client_jar)
 
     # ---- launch arguments ------------------------------------------------
-    name = os.environ.get("MC_USER") or os.environ.get("USER") or os.environ.get("USERNAME") or "Player"
+    name = (
+        cli_user
+        or os.environ.get("MC_USER")
+        or config.get("username")
+        or os.environ.get("USER")
+        or os.environ.get("USERNAME")
+        or "Player"
+    )
     player_uuid = os.environ.get("MC_UUID") or offline_uuid(name)
     token = os.environ.get("MC_TOKEN", "0")
     cp = os.pathsep.join(classpath)

@@ -82,12 +82,26 @@ mc --detach             # 后台启动，立刻回到提示符，可以直接关
 
 Windows 上把上面每条里的 `mc` 换成 `mc` 即可（同目录的 `mc.cmd` 会被自动调用）；在 Git Bash 里则是 `./mc`。
 
+## 玩家名
+
+默认跟随系统用户名（`$USER` / `%USERNAME%`），三种改法：
+
+```bash
+mc -u Steve              # 只这一次
+mc --set-user Steve      # 记住，以后都用它
+MC_USER=Steve mc         # 环境变量
+```
+
+优先级：`-u` > `MC_USER` > 保存的名字 > 系统用户名。保存的名字写在 `~/.config/mc/config.json`（Windows 是 `%APPDATA%\mc\config.json`）。
+
+> ⚠️ 离线模式的 UUID 是从名字推导的，改名等于换了身份 —— 同一个单人存档里你会变成"新玩家"，物品栏和坐标不会跟着来。想改名又保留存档，用 `MC_UUID` 钉住旧的 UUID（`mc --dry-run` 能查到当前用的是哪个）。
+
 ## 环境变量
 
 | 变量 | 说明 | 默认 |
 | --- | --- | --- |
 | `MC_DIR` | `.minecraft` 目录 | 自动探测：Windows `%APPDATA%\.minecraft`、macOS `~/Library/Application Support/minecraft`、Linux `~/.minecraft` / `~/桌面/.minecraft` / `~/Desktop/.minecraft` |
-| `MC_USER` | 玩家名 | 当前系统用户名 |
+| `MC_USER` | 玩家名，优先于 `--set-user` 保存的名字 | 保存的名字，否则系统用户名 |
 | `MC_UUID` | 玩家 UUID | 由玩家名推导的离线 UUID |
 | `MC_TOKEN` | access token | `0`（离线） |
 | `MC_MEM` | 堆大小 | `2G` |
