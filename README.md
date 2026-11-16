@@ -1,6 +1,6 @@
 # from-terminal-to-Minecraft
 
-一个单文件 Python 脚本，**不打开启动器、直接从终端启动 Minecraft**。
+一个单文件 Python 脚本，**不打开启动器、直接从终端启动 Minecraft**。Linux / macOS / Windows 通用。
 
 它读取启动器（HMCL / 官方启动器 / Prism 等）已经下载好的实例目录，自己拼 classpath、解压 natives、挑合适的 JDK，然后 `exec` java。没有额外依赖，只用标准库。
 
@@ -26,7 +26,7 @@ chmod +x ~/.local/bin/mc
 
 ```bash
 git clone https://github.com/must-be-the-Airconditi/from-terminal-to-Minecraft.git
-cd mc-launcher
+cd from-terminal-to-Minecraft
 install -Dm755 mc ~/.local/bin/mc
 ```
 
@@ -43,6 +43,30 @@ echo $PATH | tr ':' '\n' | grep -q "$HOME/.local/bin" || echo 'export PATH="$HOM
 mc --list
 ```
 
+## Windows
+
+Windows 上多一步：脚本是 `.py`，需要一个 `mc.cmd` 才能当命令用（仓库里带了一个）。
+
+```powershell
+# 1. 装 Python 3（已装可跳过）
+winget install Python.Python.3.12
+
+# 2. 下载脚本 + 启动器包装
+mkdir "$HOME\bin"
+curl.exe -fsSL -o "$HOME\bin\mc"     https://raw.githubusercontent.com/must-be-the-Airconditi/from-terminal-to-Minecraft/main/mc
+curl.exe -fsSL -o "$HOME\bin\mc.cmd" https://raw.githubusercontent.com/must-be-the-Airconditi/from-terminal-to-Minecraft/main/mc.cmd
+
+# 3. 把 %USERPROFILE%\bin 加进 PATH（一次性）
+setx PATH "$env:PATH;$HOME\bin"
+
+# 4. 新开一个终端
+mc --list
+```
+
+或者用 Git Bash / WSL 里的 `mc` 直接跑（那种情况不需要 `.cmd`）。
+
+`mc.cmd` 只是个壳：优先用 `py -3`，没有就退回 `python`，然后把参数原样转给同目录的 `mc`。PowerShell 里如果提示脚本被策略拦，用 `mc.cmd` 而不是 `mc` 就行。
+
 ## 用法
 
 ```bash
@@ -53,11 +77,13 @@ mc --fullscreen         # 全屏启动
 mc --dry-run            # 只打印 java 命令，不执行
 ```
 
+Windows 上把上面每条里的 `mc` 换成 `mc` 即可（同目录的 `mc.cmd` 会被自动调用）；在 Git Bash 里则是 `./mc`。
+
 ## 环境变量
 
 | 变量 | 说明 | 默认 |
 | --- | --- | --- |
-| `MC_DIR` | `.minecraft` 目录 | 自动探测 `~/.minecraft`、`~/桌面/.minecraft`、`~/Desktop/.minecraft` |
+| `MC_DIR` | `.minecraft` 目录 | 自动探测：Windows `%APPDATA%\.minecraft`、macOS `~/Library/Application Support/minecraft`、Linux `~/.minecraft` / `~/桌面/.minecraft` / `~/Desktop/.minecraft` |
 | `MC_USER` | 玩家名 | 当前系统用户名 |
 | `MC_UUID` | 玩家 UUID | 由玩家名推导的离线 UUID |
 | `MC_TOKEN` | access token | `0`（离线） |
@@ -80,20 +106,21 @@ MC_MEM=4G MC_JVM_ARGS="-XX:+UseZGC" mc 1.21.4-fabric
 
 ## 依赖
 
-- Python 3.8+
-- 一个够新版本的 JDK（脚本会在 `/usr/lib/jvm`、`/opt/java`、`/usr/java` 里找）
+- Python 3.8+（Windows 用 [python.org](https://www.python.org/downloads/windows/) 的安装包，或用 `winget install Python.Python.3.12`）
+- 一个够新版本的 JDK（脚本会按平台在 `/usr/lib/jvm`、`/opt/java`、`/usr/java`、`/Library/Java/JavaVirtualMachines`、`%ProgramFiles%\Java`、`%ProgramFiles%\Eclipse Adoptium`、`%LOCALAPPDATA%\Programs\...` 等处找，也认 `JAVA_HOME` 和 `MC_JAVA`）
 - 实例已经由别的启动器下载好（本脚本只负责启动，不负责下载、安装 mod loader）
 
 ## 局限
 
 - **仅离线模式**：不接 Mojang 认证，也不支持 authlib-injector 外置登录。单机能进，正版服务器/外置登录服务器会因为会话无效而拒绝
-- 只处理 Linux 规则（linux/x86_64），其它平台的 natives 规则会被跳过
+- 只按运行平台处理 rules：Windows 取 `natives-windows-x86_64`，macOS 取 `natives-osx-*`，Linux 取 `natives-linux-*`；跨平台启动（比如在 Linux 上跑 Windows 实例）不行
 - 不处理 `--quickPlay*`、demo 之类特性参数
 - Forge/NeoForge 只处理到"合并 json + exec java"这一层；如果某个版本还需要安装器改文件（老 Forge 的 `install` 步骤），需要先让启动器装好
 
 ## 测试过的环境
 
-Arch Linux + niri (Wayland)，HMCL 下载的 Fabric 实例（1.20.1 / 26.1.2，209 个 mod）用 OpenJDK 17 / 25 启动正常。
+- **Linux**：Arch Linux + niri (Wayland)，HMCL 下载的 Fabric 实例（1.20.1 / 26.1.2，209 个 mod）用 OpenJDK 17 / 25 启动正常
+- **Windows / macOS**：只做了参数拼装层面的验证（用 `MC_PLATFORM=windows` / `osx` 模拟跑 `--dry-run`，natives 目录、classpath 分隔符、rules 过滤都对），没有实机跑过。有问题欢迎开 issue
 
 ## License
 

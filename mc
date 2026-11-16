@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""mc — launch a Minecraft (Fabric/Quilt/Vanilla) instance straight from the terminal.
+"""mc — launch a Minecraft (Fabric/Quilt/Vanilla/Forge) instance straight from the terminal.
 
 No launcher GUI involved: it reads the version JSON that HMCL / the official
 launcher already downloaded, assembles the classpath, unpacks natives and
-execs java.
+execs java. Works on Linux, macOS and Windows.
 
 Usage:
-    mc                        # launch the default instance
+    mc                        # launch the newest instance
     mc --list                 # list installed instances
     mc 1.21.4-fabric          # launch a specific instance
     mc --fullscreen           # start fullscreen
@@ -19,7 +19,8 @@ Environment:
     MC_TOKEN    access token (default: 0 -> offline mode)
     MC_MEM      heap size (default: 2G)
     MC_JAVA     explicit java binary, skips auto-detection
-    MC_JVM_ARGS extra JVM args, space separated
+    MC_JVM_ARGS extra JVM args, space separated (quotes allowed)
+    MC_WIDTH / MC_HEIGHT  initial window size (default 854x480)
 
 Offline mode only: no Mojang / authlib-injector authentication is performed,
 so singleplayer works but online servers will reject the session.
@@ -28,6 +29,8 @@ so singleplayer works but online servers will reject the session.
 import hashlib
 import json
 import os
+import platform
+import shlex
 import shutil
 import subprocess
 import sys
@@ -36,6 +39,14 @@ import zipfile
 
 HOME = os.path.expanduser("~")
 DEFAULT_MEM = os.environ.get("MC_MEM", "2G")
+IS_WINDOWS = os.name == "nt"
+
+PLATFORM = os.environ.get("MC_PLATFORM") or (
+    "windows" if IS_WINDOWS else "osx" if sys.platform == "darwin" else "linux"
+)
+_MACHINE = (os.environ.get("MC_ARCH") or platform.machine() or "").lower()
+ARCH = "aarch64" if _MACHINE in ("arm64", "aarch64") else "x86_64"
+_NATIVE_EXT = ".dll" if PLATFORM == "windows" else ".dylib" if PLATFORM == "osx" else ".so"
 
 HELP = __doc__.split("\n\n", 1)[1]
 
@@ -49,7 +60,15 @@ def find_mc_dir():
     env = os.environ.get("MC_DIR")
     if env:
         return os.path.expanduser(env)
-    candidates = [
+    candidates = []
+    if PLATFORM == "windows":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            candidates.append(os.path.join(appdata, ".minecraft"))
+        candidates.append(os.path.join(HOME, "AppData", "Roaming", ".minecraft"))
+    elif PLATFORM == "osx":
+        candidates.append(os.path.join(HOME, "Library", "Application Support", "minecraft"))
+    candidates += [
         os.path.join(HOME, ".minecraft"),
         os.path.join(HOME, "桌面", ".minecraft"),
         os.path.join(HOME, "Desktop", ".minecraft"),
@@ -73,59 +92,109 @@ def list_versions(mc_dir):
     return [n for _, n in sorted(out, reverse=True)]
 
 
-def pick_java(required):
-    """Return a java binary whose major version is >= required."""
+def java_major(binary):
+    """Return the major version of a java binary, or None."""
+    try:
+        proc = subprocess.run(
+            [binary, "-version"], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in (proc.stderr or proc.stdout or "").splitlines():
+        if 'version "' in line:
+            ver = line.split('version "')[1].split('"')[0]
+            try:
+                return int(ver.split(".")[0]) if not ver.startswith("1.") else int(ver.split(".")[1])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def java_candidates():
+    """Yield possible java binaries, platform aware."""
     env = os.environ.get("MC_JAVA")
     if env:
-        return env
-    best = None
-    for root in ("/usr/lib/jvm", "/opt/java", "/usr/java"):
+        yield env
+    home = os.environ.get("JAVA_HOME")
+    if home:
+        yield os.path.join(home, "bin", "java.exe" if IS_WINDOWS else "java")
+
+    roots = []
+    if PLATFORM == "windows":
+        for base in (
+            os.environ.get("ProgramFiles", r"C:\Program Files"),
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+            os.environ.get("LOCALAPPDATA", ""),
+        ):
+            if not base:
+                continue
+            for vendor in ("Java", "Eclipse Adoptium", "Microsoft", "Zulu", "BellSoft", "Amazon Corretto"):
+                roots.append(os.path.join(base, vendor))
+        roots.append(os.path.join(HOME, ".jdks"))
+    elif PLATFORM == "osx":
+        roots += [
+            "/Library/Java/JavaVirtualMachines",
+            "/opt/homebrew/opt",
+            "/usr/local/opt",
+        ]
+    else:
+        roots += ["/usr/lib/jvm", "/opt/java", "/usr/java"]
+
+    exe = "java.exe" if IS_WINDOWS else "java"
+    for root in roots:
         if not os.path.isdir(root):
             continue
-        for entry in os.listdir(root):
-            binary = os.path.join(root, entry, "bin", "java")
-            if not os.path.isfile(binary):
-                continue
-            major = None
-            try:
-                out = subprocess.run(
-                    [binary, "-version"], capture_output=True, text=True, timeout=10
-                ).stderr
-                for line in out.splitlines():
-                    if 'version "' in line:
-                        ver = line.split('version "')[1].split('"')[0]
-                        major = int(ver.split(".")[0]) if not ver.startswith("1.") else int(ver.split(".")[1])
-                        break
-            except (OSError, subprocess.SubprocessError, ValueError):
-                continue
-            if major is None:
-                continue
-            if major < required:
-                continue
-            # prefer the smallest version that is still new enough
-            if best is None or major < best[0]:
-                best = (major, binary)
+        for entry in sorted(os.listdir(root)):
+            full = os.path.join(root, entry)
+            for rel in (os.path.join("bin", exe), os.path.join("Contents", "Home", "bin", exe)):
+                binary = os.path.join(full, rel)
+                if os.path.isfile(binary):
+                    yield binary
+
+    found = shutil.which("java")
+    if found:
+        yield found
+
+
+def pick_java(required):
+    """Return a java binary whose major version is >= required."""
+    best = None
+    seen = set()
+    for binary in java_candidates():
+        key = os.path.realpath(binary) if os.path.exists(binary) else binary
+        if key in seen:
+            continue
+        seen.add(key)
+        major = java_major(binary)
+        if major is None or major < required:
+            continue
+        # prefer the smallest (most conservative) version that is new enough
+        if best is None or major < best[0]:
+            best = (major, binary)
     if best:
         return best[1]
-    fallback = shutil.which("java")
-    if fallback:
-        return fallback
     die(f"no java >= {required} found, set MC_JAVA")
 
 
 def rule_applies(rules):
-    """Evaluate a version-JSON rule list for linux/x86_64, no extra features."""
+    """Evaluate a version-JSON rule list for this OS/arch, no extra features."""
     allow = False
     for rule in rules:
         ok = True
         os_rule = rule.get("os", {})
-        if "name" in os_rule and os_rule["name"] != "linux":
+        if "name" in os_rule and os_rule["name"] != PLATFORM:
             ok = False
-        if "arch" in os_rule and os_rule["arch"] not in ("x86_64", "amd64"):
-            ok = False
+        if "arch" in os_rule:
+            wanted = os_rule["arch"]
+            aliases = {
+                "x86_64": ("x86_64", "amd64", "x64"),
+                "aarch64": ("arm64", "aarch64"),
+            }[ARCH]
+            if wanted not in aliases:
+                ok = False
         if "version" in os_rule:
             ok = False  # kernel version predicates are not supported
-        for key, value in rule.get("features", {}).items():
+        for value in rule.get("features", {}).values():
             if value:
                 ok = False  # demo/user/quickplay features are all off
         if ok:
@@ -234,37 +303,41 @@ def main(argv):
 
     # ---- classpath -------------------------------------------------------
     classpath = []
-    natives = os.path.join(vdir, "natives-linux-x86_64")
+    natives = os.path.join(vdir, f"natives-{PLATFORM}-{ARCH}")
     os.makedirs(natives, exist_ok=True)
 
     for lib in vjson.get("libraries", []):
         if "rules" in lib and not rule_applies(lib["rules"]):
             continue
         name = lib.get("name", "")
-        classifier = (name.split(":") + [None])[3] if len(name.split(":")) > 3 else None
+        parts = name.split(":")
+        classifier = parts[3] if len(parts) > 3 else None
         has_natives = "natives" in lib or (classifier or "").startswith("natives")
         jar = lib_path(mc_dir, name)
-        if not has_natives and os.path.isfile(jar):
+        if not os.path.isfile(jar):
+            continue
+        if not has_natives:
             classpath.append(jar)
-        if has_natives and os.path.isfile(jar):
-            try:
-                with zipfile.ZipFile(jar) as zf:
-                    for member in zf.namelist():
-                        if member.endswith(".so") and "/" not in member:
-                            target = os.path.join(natives, member)
-                            if not os.path.exists(target):
-                                zf.extract(member, natives)
-            except zipfile.BadZipFile:
-                pass
+            continue
+        try:
+            with zipfile.ZipFile(jar) as zf:
+                for member in zf.namelist():
+                    if member.endswith(_NATIVE_EXT) and "/" not in member and "\\" not in member:
+                        target = os.path.join(natives, member)
+                        if not os.path.exists(target):
+                            zf.extract(member, natives)
+        except zipfile.BadZipFile:
+            pass
 
     client_jar = find_client_jar(mc_dir, version, chain, vjson)
     if os.path.isfile(client_jar):
         classpath.append(client_jar)
 
     # ---- launch arguments ------------------------------------------------
-    name = os.environ.get("MC_USER") or os.environ.get("USER") or "Player"
+    name = os.environ.get("MC_USER") or os.environ.get("USER") or os.environ.get("USERNAME") or "Player"
     player_uuid = os.environ.get("MC_UUID") or offline_uuid(name)
     token = os.environ.get("MC_TOKEN", "0")
+    cp = os.pathsep.join(classpath)
 
     variables = {
         "auth_player_name": name,
@@ -283,8 +356,8 @@ def main(argv):
         "natives_directory": natives,
         "launcher_name": "mc",
         "launcher_version": "1.0",
-        "classpath": ":".join(classpath),
-        "classpath_separator": ":",
+        "classpath": cp,
+        "classpath_separator": os.pathsep,
         "library_directory": os.path.join(mc_dir, "libraries"),
         "resolution_width": os.environ.get("MC_WIDTH", "854"),
         "resolution_height": os.environ.get("MC_HEIGHT", "480"),
@@ -320,7 +393,7 @@ def main(argv):
     # keep -cp from the JSON, replace the heap settings with ours
     jvm_args = [a for a in jvm_args if not a.startswith(("-Xmx", "-Xms"))]
     if "-cp" not in jvm_args and "-classpath" not in jvm_args:
-        jvm_args += ["-cp", ":".join(classpath)]
+        jvm_args += ["-cp", cp]
 
     if fullscreen:
         game_args.append("--fullscreen")
@@ -328,15 +401,18 @@ def main(argv):
     required = int((vjson.get("javaVersion") or {}).get("majorVersion", 21))
     java = pick_java(required)
 
-    extra = os.environ.get("MC_JVM_ARGS", "").split()
+    try:
+        extra = shlex.split(os.environ.get("MC_JVM_ARGS", ""), posix=not IS_WINDOWS)
+    except ValueError as exc:
+        die(f"cannot parse MC_JVM_ARGS: {exc}")
 
     cmd = (
         [java, f"-Xmx{DEFAULT_MEM}"]
         + extra
         + [
             "-Dfile.encoding=UTF-8",
-            "-Dsun.stdout.encoding=UTF-8",
-            "-Dsun.stderr.encoding=UTF-8",
+            "-Dstdout.encoding=UTF-8",
+            "-Dstderr.encoding=UTF-8",
             f"-Dminecraft.client.jar={client_jar}",
             "-Dminecraft.launcher.brand=mc",
             "-Dminecraft.launcher.version=1.0",
@@ -347,12 +423,15 @@ def main(argv):
     )
 
     if dry_run:
-        print(" ".join(cmd))
+        print(subprocess.list2cmdline(cmd) if IS_WINDOWS else shlex.join(cmd))
         return
 
     os.chdir(mc_dir)
     print(f"[mc] {version} | java {required} | {DEFAULT_MEM} | user {name}", file=sys.stderr)
     try:
+        if IS_WINDOWS:
+            # os.execv on Windows cannot replace the console process cleanly
+            sys.exit(subprocess.call(cmd))
         os.execv(java, cmd)
     except OSError as exc:
         die(f"exec failed: {exc}")
