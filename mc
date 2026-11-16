@@ -1,0 +1,304 @@
+#!/usr/bin/env python3
+"""mc — launch a Minecraft (Fabric/Quilt/Vanilla) instance straight from the terminal.
+
+No launcher GUI involved: it reads the version JSON that HMCL / the official
+launcher already downloaded, assembles the classpath, unpacks natives and
+execs java.
+
+Usage:
+    mc                        # launch the default instance
+    mc --list                 # list installed instances
+    mc 1.21.4-fabric          # launch a specific instance
+    mc --fullscreen           # start fullscreen
+    mc --dry-run              # print the java command instead of running it
+
+Environment:
+    MC_DIR      path to the .minecraft directory (auto-detected otherwise)
+    MC_USER     player name (default: $USER)
+    MC_UUID     player UUID (default: offline UUID derived from the name)
+    MC_TOKEN    access token (default: 0 -> offline mode)
+    MC_MEM      heap size (default: 2G)
+    MC_JAVA     explicit java binary, skips auto-detection
+    MC_JVM_ARGS extra JVM args, space separated
+
+Offline mode only: no Mojang / authlib-injector authentication is performed,
+so singleplayer works but online servers will reject the session.
+"""
+
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+import uuid as uuidlib
+import zipfile
+
+HOME = os.path.expanduser("~")
+DEFAULT_MEM = os.environ.get("MC_MEM", "2G")
+
+HELP = __doc__.split("\n\n", 1)[1]
+
+
+def die(msg):
+    sys.exit("mc: " + msg)
+
+
+def find_mc_dir():
+    """Locate the .minecraft directory."""
+    env = os.environ.get("MC_DIR")
+    if env:
+        return os.path.expanduser(env)
+    candidates = [
+        os.path.join(HOME, ".minecraft"),
+        os.path.join(HOME, "桌面", ".minecraft"),
+        os.path.join(HOME, "Desktop", ".minecraft"),
+        os.path.join(HOME, ".local", "share", "minecraft"),
+    ]
+    for c in candidates:
+        if os.path.isdir(os.path.join(c, "versions")):
+            return c
+    die("cannot find .minecraft, set MC_DIR")
+
+
+def list_versions(mc_dir):
+    vroot = os.path.join(mc_dir, "versions")
+    if not os.path.isdir(vroot):
+        return []
+    out = []
+    for name in os.listdir(vroot):
+        j = os.path.join(vroot, name, name + ".json")
+        if os.path.isfile(j):
+            out.append((os.path.getmtime(j), name))
+    return [n for _, n in sorted(out, reverse=True)]
+
+
+def pick_java(required):
+    """Return a java binary whose major version is >= required."""
+    env = os.environ.get("MC_JAVA")
+    if env:
+        return env
+    best = None
+    for root in ("/usr/lib/jvm", "/opt/java", "/usr/java"):
+        if not os.path.isdir(root):
+            continue
+        for entry in os.listdir(root):
+            binary = os.path.join(root, entry, "bin", "java")
+            if not os.path.isfile(binary):
+                continue
+            major = None
+            try:
+                out = subprocess.run(
+                    [binary, "-version"], capture_output=True, text=True, timeout=10
+                ).stderr
+                for line in out.splitlines():
+                    if 'version "' in line:
+                        ver = line.split('version "')[1].split('"')[0]
+                        major = int(ver.split(".")[0]) if not ver.startswith("1.") else int(ver.split(".")[1])
+                        break
+            except (OSError, subprocess.SubprocessError, ValueError):
+                continue
+            if major is None:
+                continue
+            if major < required:
+                continue
+            # prefer the smallest version that is still new enough
+            if best is None or major < best[0]:
+                best = (major, binary)
+    if best:
+        return best[1]
+    fallback = shutil.which("java")
+    if fallback:
+        return fallback
+    die(f"no java >= {required} found, set MC_JAVA")
+
+
+def rule_applies(rules):
+    """Evaluate a version-JSON rule list for linux/x86_64, no extra features."""
+    allow = False
+    for rule in rules:
+        ok = True
+        os_rule = rule.get("os", {})
+        if "name" in os_rule and os_rule["name"] != "linux":
+            ok = False
+        if "arch" in os_rule and os_rule["arch"] not in ("x86_64", "amd64"):
+            ok = False
+        if "version" in os_rule:
+            ok = False  # kernel version predicates are not supported
+        for key, value in rule.get("features", {}).items():
+            if value:
+                ok = False  # demo/user/quickplay features are all off
+        if ok:
+            allow = rule.get("action") == "allow"
+    return allow
+
+
+def lib_path(mc_dir, coord):
+    parts = coord.split(":")
+    group, artifact, version = parts[0], parts[1], parts[2]
+    classifier = parts[3] if len(parts) > 3 else None
+    filename = f"{artifact}-{version}" + (f"-{classifier}" if classifier else "") + ".jar"
+    return os.path.join(mc_dir, "libraries", group.replace(".", "/"), artifact, version, filename)
+
+
+def offline_uuid(name):
+    digest = bytearray(hashlib.md5(f"OfflinePlayer:{name}".encode()).digest())
+    digest[6] = (digest[6] & 0x0F) | 0x30  # version 3
+    digest[8] = (digest[8] & 0x3F) | 0x80  # variant
+    return str(uuidlib.UUID(bytes=bytes(digest)))
+
+
+def main(argv):
+    if "-h" in argv or "--help" in argv:
+        print(HELP)
+        return
+
+    mc_dir = find_mc_dir()
+    versions = list_versions(mc_dir)
+    if not versions:
+        die(f"no installed versions in {mc_dir}/versions")
+
+    if "--list" in argv:
+        for v in versions:
+            print(v)
+        return
+
+    version = next((a for a in argv if not a.startswith("-")), versions[0])
+    fullscreen = "--fullscreen" in argv
+    dry_run = "--dry-run" in argv
+
+    vdir = os.path.join(mc_dir, "versions", version)
+    vjson_path = os.path.join(vdir, version + ".json")
+    if not os.path.isfile(vjson_path):
+        die(f"unknown instance '{version}' (try: mc --list)")
+    with open(vjson_path, encoding="utf-8") as fh:
+        vjson = json.load(fh)
+
+    # ---- classpath -------------------------------------------------------
+    classpath = []
+    natives = os.path.join(vdir, "natives-linux-x86_64")
+    os.makedirs(natives, exist_ok=True)
+
+    for lib in vjson.get("libraries", []):
+        if "rules" in lib and not rule_applies(lib["rules"]):
+            continue
+        name = lib.get("name", "")
+        classifier = (name.split(":") + [None])[3] if len(name.split(":")) > 3 else None
+        has_natives = "natives" in lib or (classifier or "").startswith("natives")
+        jar = lib_path(mc_dir, name)
+        if not has_natives and os.path.isfile(jar):
+            classpath.append(jar)
+        if has_natives and os.path.isfile(jar):
+            try:
+                with zipfile.ZipFile(jar) as zf:
+                    for member in zf.namelist():
+                        if member.endswith(".so") and "/" not in member:
+                            target = os.path.join(natives, member)
+                            if not os.path.exists(target):
+                                zf.extract(member, natives)
+            except zipfile.BadZipFile:
+                pass
+
+    client_jar = os.path.join(vdir, version + ".jar")
+    if os.path.isfile(client_jar):
+        classpath.append(client_jar)
+
+    # ---- launch arguments ------------------------------------------------
+    name = os.environ.get("MC_USER") or os.environ.get("USER") or "Player"
+    player_uuid = os.environ.get("MC_UUID") or offline_uuid(name)
+    token = os.environ.get("MC_TOKEN", "0")
+
+    variables = {
+        "auth_player_name": name,
+        "version_name": version,
+        "game_directory": vdir,
+        "assets_root": os.path.join(mc_dir, "assets"),
+        "game_assets": os.path.join(mc_dir, "assets", "virtual", "legacy"),
+        "assets_index_name": vjson.get("assetIndex", {}).get("id", "0"),
+        "auth_uuid": player_uuid,
+        "auth_access_token": token,
+        "auth_session": token,
+        "clientid": "0",
+        "auth_xuid": "0",
+        "user_type": "msa",
+        "version_type": "mc-cli",
+        "natives_directory": natives,
+        "launcher_name": "mc",
+        "launcher_version": "1.0",
+        "classpath": ":".join(classpath),
+        "classpath_separator": ":",
+        "library_directory": os.path.join(mc_dir, "libraries"),
+        "resolution_width": os.environ.get("MC_WIDTH", "854"),
+        "resolution_height": os.environ.get("MC_HEIGHT", "480"),
+    }
+
+    def resolve(value):
+        if isinstance(value, list):
+            return [resolve(v) for v in value]
+        if isinstance(value, str):
+            for key, val in variables.items():
+                value = value.replace("${" + key + "}", str(val))
+        return value
+
+    def collect(items):
+        out = []
+        for item in items:
+            if isinstance(item, str):
+                out.append(resolve(item))
+            elif isinstance(item, dict):
+                if "rules" not in item or rule_applies(item["rules"]):
+                    vals = item.get("value", [])
+                    out.extend(collect([vals] if isinstance(vals, str) else vals))
+        return out
+
+    arguments = vjson.get("arguments") or {}
+    if arguments:
+        jvm_args = collect(arguments.get("jvm", []))
+        game_args = collect(arguments.get("game", []))
+    else:  # pre-1.13 format
+        jvm_args = ["-Djava.library.path=${natives_directory}", "-cp", "${classpath}"]
+        game_args = [resolve(a) for a in vjson.get("minecraftArguments", "").split()]
+
+    # keep -cp from the JSON, replace the heap settings with ours
+    jvm_args = [a for a in jvm_args if not a.startswith(("-Xmx", "-Xms"))]
+    if "-cp" not in jvm_args and "-classpath" not in jvm_args:
+        jvm_args += ["-cp", ":".join(classpath)]
+
+    if fullscreen:
+        game_args.append("--fullscreen")
+
+    required = int((vjson.get("javaVersion") or {}).get("majorVersion", 21))
+    java = pick_java(required)
+
+    extra = os.environ.get("MC_JVM_ARGS", "").split()
+
+    cmd = (
+        [java, f"-Xmx{DEFAULT_MEM}"]
+        + extra
+        + [
+            "-Dfile.encoding=UTF-8",
+            "-Dsun.stdout.encoding=UTF-8",
+            "-Dsun.stderr.encoding=UTF-8",
+            f"-Dminecraft.client.jar={client_jar}",
+            "-Dminecraft.launcher.brand=mc",
+            "-Dminecraft.launcher.version=1.0",
+        ]
+        + jvm_args
+        + [vjson["mainClass"]]
+        + game_args
+    )
+
+    if dry_run:
+        print(" ".join(cmd))
+        return
+
+    os.chdir(mc_dir)
+    print(f"[mc] {version} | java {required} | {DEFAULT_MEM} | user {name}", file=sys.stderr)
+    try:
+        os.execv(java, cmd)
+    except OSError as exc:
+        die(f"exec failed: {exc}")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
