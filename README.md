@@ -1,4 +1,4 @@
-# mc-launcher
+# from-terminal-to-minecraft
 
 一个单文件 Python 脚本，**不打开启动器、直接从终端启动 Minecraft**。
 
