@@ -141,6 +141,66 @@ def lib_path(mc_dir, coord):
     return os.path.join(mc_dir, "libraries", group.replace(".", "/"), artifact, version, filename)
 
 
+def merge_versions(parent, child):
+    """Merge an inheriting version JSON on top of its parent (official rules)."""
+    merged = dict(parent)
+    for key, value in child.items():
+        if key in ("libraries", "arguments"):
+            continue
+        merged[key] = value  # scalar fields: child wins
+
+    libs, seen = [], set()
+    for lib in list(child.get("libraries", [])) + list(parent.get("libraries", [])):
+        name = lib.get("name")
+        if name in seen:
+            continue
+        seen.add(name)
+        libs.append(lib)
+    merged["libraries"] = libs
+
+    parent_args = parent.get("arguments") or {}
+    child_args = child.get("arguments") or {}
+    if parent_args or child_args:
+        merged["arguments"] = {
+            "game": list(parent_args.get("game", [])) + list(child_args.get("game", [])),
+            "jvm": list(parent_args.get("jvm", [])) + list(child_args.get("jvm", [])),
+        }
+    elif "arguments" in merged:
+        merged.pop("arguments")
+    return merged
+
+
+def load_version(mc_dir, version):
+    """Load a version JSON, resolving inheritsFrom chains."""
+    chain, data = [], None
+    current = version
+    while current:
+        vdir = os.path.join(mc_dir, "versions", current)
+        path = os.path.join(vdir, current + ".json")
+        if not os.path.isfile(path):
+            die(f"missing version json for '{current}'")
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+        chain.append(current)
+        data = merge_versions(raw, data) if data else raw  # raw is the parent here
+        current = raw.get("inheritsFrom")
+    return data, chain
+
+
+def find_client_jar(mc_dir, version, chain, vjson):
+    """Which client jar to put on the classpath."""
+    candidates = []
+    if vjson.get("jar"):
+        candidates.append(vjson["jar"])
+    candidates.extend(chain)
+    candidates.append(version)
+    for vid in candidates:
+        jar = os.path.join(mc_dir, "versions", vid, vid + ".jar")
+        if os.path.isfile(jar):
+            return jar
+    return os.path.join(mc_dir, "versions", version, version + ".jar")
+
+
 def offline_uuid(name):
     digest = bytearray(hashlib.md5(f"OfflinePlayer:{name}".encode()).digest())
     digest[6] = (digest[6] & 0x0F) | 0x30  # version 3
@@ -168,11 +228,9 @@ def main(argv):
     dry_run = "--dry-run" in argv
 
     vdir = os.path.join(mc_dir, "versions", version)
-    vjson_path = os.path.join(vdir, version + ".json")
-    if not os.path.isfile(vjson_path):
+    if not os.path.isfile(os.path.join(vdir, version + ".json")):
         die(f"unknown instance '{version}' (try: mc --list)")
-    with open(vjson_path, encoding="utf-8") as fh:
-        vjson = json.load(fh)
+    vjson, chain = load_version(mc_dir, version)
 
     # ---- classpath -------------------------------------------------------
     classpath = []
@@ -199,7 +257,7 @@ def main(argv):
             except zipfile.BadZipFile:
                 pass
 
-    client_jar = os.path.join(vdir, version + ".jar")
+    client_jar = find_client_jar(mc_dir, version, chain, vjson)
     if os.path.isfile(client_jar):
         classpath.append(client_jar)
 

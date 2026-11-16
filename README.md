@@ -70,6 +70,14 @@ mc --dry-run            # 只打印 java 命令，不执行
 MC_MEM=4G MC_JVM_ARGS="-XX:+UseZGC" mc 1.21.4-fabric
 ```
 
+## 兼容性
+
+脚本不挑加载器：它只读 version json 里的 `mainClass`、`libraries` 和启动参数，所以
+
+- 原版 / Fabric / Quilt / Forge / NeoForge 都能用（取决于 `mainClass` 指向谁）
+- 支持 `inheritsFrom` 继承链，也就是 Forge/NeoForge 官方格式里"只写增量、基础库靠继承"的那种 json，会逐级合并
+- 支持 1.13 之前的 `minecraftArguments` 老格式（含 `--tweakClass`）
+
 ## 依赖
 
 - Python 3.8+
@@ -81,6 +89,7 @@ MC_MEM=4G MC_JVM_ARGS="-XX:+UseZGC" mc 1.21.4-fabric
 - **仅离线模式**：不接 Mojang 认证，也不支持 authlib-injector 外置登录。单机能进，正版服务器/外置登录服务器会因为会话无效而拒绝
 - 只处理 Linux 规则（linux/x86_64），其它平台的 natives 规则会被跳过
 - 不处理 `--quickPlay*`、demo 之类特性参数
+- Forge/NeoForge 只处理到"合并 json + exec java"这一层；如果某个版本还需要安装器改文件（老 Forge 的 `install` 步骤），需要先让启动器装好
 
 ## 测试过的环境
 
