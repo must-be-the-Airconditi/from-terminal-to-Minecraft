@@ -17,7 +17,7 @@
 **方式一：直接下载**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/must-be-the-Airconditi/mc-launcher/main/mc \
+curl -fsSL https://raw.githubusercontent.com/must-be-the-Airconditi/from-terminal-to-Minecraft/main/mc \
   -o ~/.local/bin/mc
 chmod +x ~/.local/bin/mc
 ```
@@ -25,7 +25,7 @@ chmod +x ~/.local/bin/mc
 **方式二：clone**
 
 ```bash
-git clone https://github.com/must-be-the-Airconditi/mc-launcher.git
+git clone https://github.com/must-be-the-Airconditi/from-terminal-to-Minecraft.git
 cd mc-launcher
 install -Dm755 mc ~/.local/bin/mc
 ```
@@ -33,7 +33,7 @@ install -Dm755 mc ~/.local/bin/mc
 **方式三：就地软链接**（方便以后 `git pull` 更新）
 
 ```bash
-ln -sf ~/projects/mc-launcher/mc ~/.local/bin/mc
+ln -sf ~/projects/from-terminal-to-Minecraft/mc ~/.local/bin/mc
 ```
 
 确认 `~/.local/bin` 在 `PATH` 里：
