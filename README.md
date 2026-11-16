@@ -10,6 +10,39 @@
 - 想写成脚本/快捷键/桌面文件，或者塞进 systemd-run、tmux 里跑
 - 启动器崩了、或者只想飞快换实例
 
+## 安装
+
+单文件脚本，放哪都行，只要在 `PATH` 里。
+
+**方式一：直接下载**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/must-be-the-Airconditi/mc-launcher/main/mc \
+  -o ~/.local/bin/mc
+chmod +x ~/.local/bin/mc
+```
+
+**方式二：clone**
+
+```bash
+git clone https://github.com/must-be-the-Airconditi/mc-launcher.git
+cd mc-launcher
+install -Dm755 mc ~/.local/bin/mc
+```
+
+**方式三：就地软链接**（方便以后 `git pull` 更新）
+
+```bash
+ln -sf ~/projects/mc-launcher/mc ~/.local/bin/mc
+```
+
+确认 `~/.local/bin` 在 `PATH` 里：
+
+```bash
+echo $PATH | tr ':' '\n' | grep -q "$HOME/.local/bin" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+mc --list
+```
+
 ## 用法
 
 ```bash
