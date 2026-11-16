@@ -11,6 +11,8 @@ Usage:
     mc 1.21.4-fabric          # launch a specific instance
     mc --fullscreen           # start fullscreen
     mc --dry-run              # print the java command instead of running it
+    mc --detach               # start in the background, log to logs/mc-stdout.log,
+                              # then you can close the terminal
 
 Environment:
     MC_DIR      path to the .minecraft directory (auto-detected otherwise)
@@ -21,6 +23,7 @@ Environment:
     MC_JAVA     explicit java binary, skips auto-detection
     MC_JVM_ARGS extra JVM args, space separated (quotes allowed)
     MC_WIDTH / MC_HEIGHT  initial window size (default 854x480)
+    MC_DETACH   set to 1 to always behave like --detach
 
 Offline mode only: no Mojang / authlib-injector authentication is performed,
 so singleplayer works but online servers will reject the session.
@@ -295,6 +298,7 @@ def main(argv):
     version = next((a for a in argv if not a.startswith("-")), versions[0])
     fullscreen = "--fullscreen" in argv
     dry_run = "--dry-run" in argv
+    detach = any(a in ("--detach", "-d") for a in argv) or os.environ.get("MC_DETACH") not in (None, "", "0")
 
     vdir = os.path.join(mc_dir, "versions", version)
     if not os.path.isfile(os.path.join(vdir, version + ".json")):
@@ -428,6 +432,36 @@ def main(argv):
 
     os.chdir(mc_dir)
     print(f"[mc] {version} | java {required} | {DEFAULT_MEM} | user {name}", file=sys.stderr)
+
+    if detach:
+        # hand the game to its own session/process group and exit immediately,
+        # so closing the terminal does not take the game down with it
+        log_path = os.path.join(vdir, "logs", "mc-stdout.log")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        with open(log_path, "wb") as log:
+            try:
+                if IS_WINDOWS:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdin=subprocess.DEVNULL,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        creationflags=0x00000008 | 0x00000200,  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+                    )
+                else:
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdin=subprocess.DEVNULL,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        start_new_session=True,
+                        close_fds=True,
+                    )
+            except OSError as exc:
+                die(f"spawn failed: {exc}")
+        print(f"[mc] started in background (pid {proc.pid}); log: {log_path}", file=sys.stderr)
+        return
+
     try:
         if IS_WINDOWS:
             # os.execv on Windows cannot replace the console process cleanly

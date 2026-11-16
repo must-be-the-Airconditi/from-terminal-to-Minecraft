@@ -75,7 +75,10 @@ mc --list               # 列出已安装实例
 mc 1.21.4-fabric        # 指定实例名
 mc --fullscreen         # 全屏启动
 mc --dry-run            # 只打印 java 命令，不执行
+mc --detach             # 后台启动，立刻回到提示符，可以直接关终端
 ```
+
+`--detach`（或 `MC_DETACH=1`）会把游戏放进独立会话后立刻退出：终端窗口和它那几十 MB 内存都能关掉，游戏继续跑。输出写到实例目录的 `logs/mc-stdout.log`，`Ctrl+C` / 关窗口都不会带走游戏；想结束就正常退出游戏，或者 `pkill -f net.fabricmc`（Linux）/ 任务管理器（Windows）。
 
 Windows 上把上面每条里的 `mc` 换成 `mc` 即可（同目录的 `mc.cmd` 会被自动调用）；在 Git Bash 里则是 `./mc`。
 
